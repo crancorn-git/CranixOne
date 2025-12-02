@@ -1,6 +1,6 @@
 {
   "name": "cranix-one",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Secure Terminal Access",
   "author": "Cranix",
   "homepage": "./",
@@ -36,12 +36,13 @@
     "electron": "electron .",
     "dist": "npm run build && electron-builder"
   },
-  "build": {
+"build": {
     "appId": "com.cranix.one",
     "productName": "CranixOne",
     "win": {
       "target": "nsis",
       "icon": "public/favicon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "publish": [
         "github"
       ]

@@ -418,7 +418,7 @@ function App() {
       {!isLoggedIn ? (
         <div className="joinChatContainer">
           <div className="ios-icon"><div className="inner-icon">C1</div></div>
-          <h3>{isRegistering ? "Create Account" : " CranixOne v0.0.2"}</h3>
+          <h3>{isRegistering ? "Create Account" : " CranixOne v0.0.4"}</h3>
           <p className="subtitle">Secure Terminal Access</p>
           <input type="text" placeholder="Username" onChange={(e) => setUsername(e.target.value)} />
           <input type="password" placeholder="Password" onChange={(e) => setPassword(e.target.value)} />
