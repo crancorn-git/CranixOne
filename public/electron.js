@@ -1,8 +1,14 @@
 const { app, BrowserWindow, session, ipcMain } = require('electron');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
+const log = require('electron-log');
 
-// Config Updater
+// --- CONFIGURE LOGGING ---
+autoUpdater.logger = log;
+autoUpdater.logger.transports.file.level = 'info';
+log.info('App starting...');
+
+// --- CONFIG UPDATER ---
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
@@ -45,6 +51,7 @@ function createWindow() {
     win.show();
     // TRIGGER UPDATE CHECK ON STARTUP
     if (!isDev) {
+      log.info('Checking for updates...');
       autoUpdater.checkForUpdatesAndNotify();
     }
   });
@@ -66,34 +73,42 @@ app.on('activate', () => {
 
 // --- AUTO UPDATER EVENTS (Send to React) ---
 
+function sendStatusToWindow(text, info = null) {
+  log.info(text);
+  if (win) {
+    win.webContents.send('updater_message', { status: text, info: info });
+  }
+}
+
 autoUpdater.on('checking-for-update', () => {
-  if(win) win.webContents.send('updater_message', { status: 'checking' });
+  sendStatusToWindow('checking');
 });
 
-autoUpdater.on('update-available', () => {
-  if(win) win.webContents.send('updater_message', { status: 'available' });
+autoUpdater.on('update-available', (info) => {
+  sendStatusToWindow('available');
 });
 
-autoUpdater.on('update-not-available', () => {
-  if(win) win.webContents.send('updater_message', { status: 'no_update' });
+autoUpdater.on('update-not-available', (info) => {
+  sendStatusToWindow('no_update');
 });
 
 autoUpdater.on('error', (err) => {
-  // If error, just let the app open
-  if(win) win.webContents.send('updater_message', { status: 'error' });
+  sendStatusToWindow('error', err.toString());
 });
 
 autoUpdater.on('download-progress', (progressObj) => {
-  if(win) win.webContents.send('updater_message', { 
-    status: 'downloading', 
-    progress: progressObj.percent 
-  });
+  if (win) {
+    win.webContents.send('updater_message', { 
+      status: 'downloading', 
+      progress: progressObj.percent 
+    });
+  }
 });
 
-autoUpdater.on('update-downloaded', () => {
-  if(win) win.webContents.send('updater_message', { status: 'downloaded' });
-  // Quit and install after 2 seconds
+autoUpdater.on('update-downloaded', (info) => {
+  sendStatusToWindow('downloaded');
+  // Quit and install after 4 seconds
   setTimeout(() => {
     autoUpdater.quitAndInstall();
-  }, 2000);
+  }, 4000);
 });

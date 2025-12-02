@@ -1,6 +1,6 @@
 {
   "name": "cranix-one",
-  "version": "0.0.6",
+  "version": "0.0.1",
   "description": "Secure Terminal Access",
   "author": "Cranix",
   "homepage": "./",
@@ -15,6 +15,7 @@
     "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
     "axios": "^1.6.0",
+    "electron-log": "^5.0.0",
     "electron-updater": "^6.1.7",
     "peerjs": "^1.5.1",
     "react": "^18.2.0",

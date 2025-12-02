@@ -12,6 +12,9 @@ const PEER_CONFIG = {
   secure: false,
 };
 
+// Electron IPC (Require securely)
+const ipcRenderer = window.require ? window.require('electron').ipcRenderer : null;
+
 let socket;
 
 function App() {
@@ -39,6 +42,9 @@ function App() {
   const [incomingCall, setIncomingCall] = useState(null);
   const [isInCall, setIsInCall] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+
+  // UPDATER STATE
+  const [updateStatus, setUpdateStatus] = useState("");
   
   // REFS
   const bottomRef = useRef(null);
@@ -47,8 +53,9 @@ function App() {
   const myStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
 
-  // --- AUTO LOGIN & CLEANUP ---
+  // --- AUTO LOGIN, UPDATER & CLEANUP ---
   useEffect(() => {
+    // 1. Check LocalStorage
     const savedUser = localStorage.getItem("cranix_user");
     if (savedUser) {
       const userObj = JSON.parse(savedUser);
@@ -60,9 +67,40 @@ function App() {
       fetchRequests(userObj.username);
     }
 
+    // 2. Setup Auto Updater Listener
+    if (ipcRenderer) {
+      ipcRenderer.on('updater_message', (event, data) => {
+        console.log("Updater Event:", data);
+        switch (data.status) {
+          case 'checking':
+            setUpdateStatus("Checking for updates...");
+            break;
+          case 'available':
+            setUpdateStatus("Update found. Downloading...");
+            break;
+          case 'no_update':
+            // setUpdateStatus("You are up to date.");
+            setTimeout(() => setUpdateStatus(""), 3000);
+            break;
+          case 'downloading':
+            setUpdateStatus(`Downloading Update: ${Math.round(data.progress)}%`);
+            break;
+          case 'downloaded':
+            setUpdateStatus("Update downloaded. Restarting in 4 seconds...");
+            break;
+          case 'error':
+            setUpdateStatus(`Update Error: ${data.info}`);
+            break;
+          default:
+            break;
+        }
+      });
+    }
+
     return () => {
       if (peerInstance.current) peerInstance.current.destroy();
       if (socket) socket.disconnect();
+      if (ipcRenderer) ipcRenderer.removeAllListeners('updater_message');
     };
   }, []);
 
@@ -233,12 +271,10 @@ function App() {
 
   // --- APP LOGIC ---
   
-  // UPDATED FETCH: Logs response to console
   const fetchFriends = async (user) => {
     try {
       const res = await fetch(`${SERVER_URL}/friends/${user}`);
       const data = await res.json();
-      console.log("Friends List:", data);
       setFriends(data);
     } catch(e) { console.error("Error fetching friends"); }
   };
@@ -251,7 +287,6 @@ function App() {
     } catch(e) {}
   };
 
-  // UPDATED SEND: Shows Alerts for errors
   const sendFriendRequest = async () => {
     if(!friendInput) return;
     try {
@@ -368,10 +403,22 @@ function App() {
     <div className="App">
       <audio ref={remoteAudioRef} />
 
+      {/* --- UPDATE BANNER --- */}
+      {updateStatus && (
+        <div style={{
+          position: 'absolute', top: 0, left: 0, width: '100%', 
+          background: '#0055FF', color: 'white', padding: '8px', 
+          textAlign: 'center', zIndex: 9999, fontWeight: 'bold', fontSize: '14px',
+          boxShadow: '0 2px 10px rgba(0,0,0,0.3)'
+        }}>
+          {updateStatus}
+        </div>
+      )}
+
       {!isLoggedIn ? (
         <div className="joinChatContainer">
           <div className="ios-icon"><div className="inner-icon">C1</div></div>
-          <h3>{isRegistering ? "Create Account" : " CranixOne v0.0.7"}</h3>
+          <h3>{isRegistering ? "Create Account" : " CranixOne v0.0.2"}</h3>
           <p className="subtitle">Secure Terminal Access</p>
           <input type="text" placeholder="Username" onChange={(e) => setUsername(e.target.value)} />
           <input type="password" placeholder="Password" onChange={(e) => setPassword(e.target.value)} />
@@ -392,7 +439,6 @@ function App() {
             <div className="sidebar-icon" style={{background:'#333', color:'#fff', fontSize:'20px'}} onClick={() => setShowAddFriend(!showAddFriend)} title="Add Friend">+</div>
             {requests.length > 0 && <div className="req-badge">{requests.length}</div>}
             
-            {/* UPDATED FRIENDS LIST: Scrollable */}
             <div className="friends-list">
               {friends.map((friend) => (
                 <div 
