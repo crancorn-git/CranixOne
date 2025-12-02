@@ -89,7 +89,7 @@ git push origin $newVersion
 # --- STEP 5: UPLOAD TO GITHUB ---
 Write-Step "Creating GitHub Release..."
 
-$exePath = "dist\CranixOne Setup $versionNum.exe"
+$exePath = "dist\CranixOne-Setup-$versionNum.exe"
 $ymlPath = "dist\latest.yml"
 
 if (!(Test-Path $exePath)) {
