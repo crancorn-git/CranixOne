@@ -1,6 +1,10 @@
 <#
 .SYNOPSIS
-    The "Do Everything" Release Script for CranixOne (Fixed for Spaces).
+    The "Do Everything" Release Script for CranixOne.
+    - Loads GH_TOKEN from .env
+    - Fixes Git
+    - Builds App
+    - Uploads to GitHub
 #>
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +13,21 @@ $RepoURL = "https://github.com/crancorn-git/CranixOne.git"
 function Write-Step { Write-Host "`n[CRANIX-AUTO] $args" -ForegroundColor Cyan }
 function Write-Success { Write-Host "[SUCCESS] $args" -ForegroundColor Green }
 function Write-ErrorMsg { Write-Host "[ERROR] $args" -ForegroundColor Red }
+
+# --- STEP 0: LOAD SECRETS ---
+if (Test-Path ".env") {
+    Get-Content .env | ForEach-Object {
+        $parts = $_ -split '=', 2
+        if ($parts.Count -eq 2) {
+            $name = $parts[0].Trim()
+            $value = $parts[1].Trim()
+            if ($name -eq "GH_TOKEN") { 
+                $env:GH_TOKEN = $value 
+                Write-Host "[AUTH] Loaded GH_TOKEN from .env" -ForegroundColor Green
+            }
+        }
+    }
+}
 
 # --- STEP 1: GIT HEALTH CHECK ---
 Write-Step "Checking Git Configuration..."
@@ -39,12 +58,13 @@ if (git status --porcelain) {
 
 # --- STEP 2: BUMP VERSION ---
 Write-Step "Bumping Version..."
+# This updates package.json and returns vX.X.X
 $newVersion = npm version patch --no-git-tag-version
 $versionNum = $newVersion -replace "v",""
 Write-Success "Target Version: $newVersion"
 
 # --- STEP 3: BUILD ---
-Write-Step "Building Electron App..."
+Write-Step "Building Electron App (This takes 1-2 mins)..."
 try {
     npm run dist
     if ($LASTEXITCODE -ne 0) { throw "Build failed" }
@@ -69,23 +89,19 @@ git push origin $newVersion
 # --- STEP 5: UPLOAD TO GITHUB ---
 Write-Step "Creating GitHub Release..."
 
-# QUOTES ARE CRITICAL HERE FOR POWERSHELL
 $exePath = "dist\CranixOne Setup $versionNum.exe"
 $ymlPath = "dist\latest.yml"
 
 if (!(Test-Path $exePath)) {
     Write-ErrorMsg "Error: File not found: '$exePath'"
-    # List directory to show what IS there for debugging
     Get-ChildItem dist
     exit 1
 }
 
 try {
-    # Using specific arguments array to handle spaces correctly
     Write-Host "Uploading: $exePath"
     
-    # Create the release AND upload assets in one go
-    # We use Start-Process to avoid PowerShell parsing issues with spaces
+    # We use an array for arguments to safely handle spaces in filenames
     $ghArgs = @("release", "create", "$newVersion", "$exePath", "$ymlPath", "--title", "CranixOne $newVersion", "--generate-notes")
     
     & gh $ghArgs
@@ -102,6 +118,7 @@ try {
     }
 }
 catch {
-    Write-ErrorMsg "GitHub upload failed. Try running this manually:"
+    Write-ErrorMsg "GitHub upload failed. If it was a permissions error, check your .env file."
+    Write-Host "Manual Fallback Command:"
     Write-Host "gh release create $newVersion `"$exePath`" `"$ymlPath`" --generate-notes" -ForegroundColor Yellow
 }
