@@ -1,0 +1,81 @@
+{
+  "name": "cranix-one",
+  "version": "0.0.2",
+  "description": "Secure Terminal Access",
+  "author": "Cranix",
+  "homepage": "./",
+  "main": "public/electron.js",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/crancorn-git/CranixOne.git"
+  },
+  "dependencies": {
+    "@testing-library/jest-dom": "^5.17.0",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "axios": "^1.6.0",
+    "electron-updater": "^6.1.7",
+    "peerjs": "^1.5.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "socket.io-client": "^4.7.0",
+    "web-vitals": "^2.1.4"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "electron": "electron .",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.cranix.one",
+    "productName": "CranixOne",
+    "win": {
+      "target": "nsis",
+      "icon": "public/favicon.ico",
+      "publish": [
+        "github"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "crancorn-git",
+        "repo": "CranixOne"
+      }
+    ],
+    "files": [
+      "build/**/*",
+      "public/electron.js"
+    ],
+    "directories": {
+      "buildResources": "public"
+    }
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
