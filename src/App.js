@@ -4,9 +4,9 @@ import Peer from "peerjs";
 import { useState, useEffect, useRef } from "react";
 
 // SERVER CONFIG
-const SERVER_URL = "http://ix.nickyboi.com:3000";
+const SERVER_URL = "http://81.106.250.70:3000";
 const PEER_CONFIG = {
-  host: "81.96.163.137", 
+  host: "81.106.250.70", 
   port: 3002,
   path: "/cranix",
   secure: false,
