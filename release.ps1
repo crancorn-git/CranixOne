@@ -2,7 +2,8 @@
 .SYNOPSIS
     The "Do Everything" Release Script for CranixOne.
     - Loads GH_TOKEN from .env
-    - Fixes Git
+    - Syncs with GitHub (Prevents "fetch first" errors)
+    - Bumps Version
     - Builds App
     - Uploads to GitHub
 #>
@@ -50,10 +51,23 @@ if ($currentBranch -ne "main") {
     git branch -M main
 }
 
+# Commit local work BEFORE pulling to avoid losing it
 if (git status --porcelain) {
     Write-Host "Unsaved changes detected. Auto-committing..."
     git add .
     git commit -m "feat: pre-release updates"
+}
+
+# --- NEW STEP: SYNC WITH GITHUB ---
+Write-Step "Syncing with GitHub..."
+try {
+    # This prevents the "rejected... fetch first" error
+    git pull origin main
+}
+catch {
+    Write-ErrorMsg "Git Pull Failed! You have merge conflicts."
+    Write-ErrorMsg "Please manually run 'git pull origin main', fix conflicts, then run this script again."
+    exit 1
 }
 
 # --- STEP 2: BUMP VERSION ---
@@ -83,7 +97,9 @@ git add package.json package-lock.json
 git commit -m "chore: release $newVersion"
 git tag $newVersion
 
-git push -u origin main
+# Push commits first
+git push origin main
+# Then push the tag
 git push origin $newVersion
 
 # --- STEP 5: UPLOAD TO GITHUB ---
