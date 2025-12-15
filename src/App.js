@@ -2,589 +2,468 @@ import "./App.css";
 import io from "socket.io-client";
 import Peer from "peerjs"; 
 import { useState, useEffect, useRef } from "react";
+import toast, { Toaster } from 'react-hot-toast'; 
+import EmojiPicker from 'emoji-picker-react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
-// SERVER CONFIG
-const SERVER_URL = "http://81.106.250.70:3000";
-const PEER_CONFIG = {
-  host: "81.106.250.70", 
-  port: 3002,
-  path: "/cranix",
-  secure: false,
-};
-
-// Electron IPC (Require securely)
+const SERVER_URL = "http://81.106.250.70:3000"; 
+const PEER_CONFIG = { host: "81.106.250.70", port: 3002, path: "/cranix", secure: false };
 const ipcRenderer = window.require ? window.require('electron').ipcRenderer : null;
-
 let socket;
 
+// --- IDLE TIMER HOOK ---
+const useIdleTimer = (onIdle, timeout = 600000) => { // 10 mins
+    const timer = useRef(null);
+    useEffect(() => {
+        const reset = () => { clearTimeout(timer.current); timer.current = setTimeout(onIdle, timeout); };
+        window.addEventListener('mousemove', reset); window.addEventListener('keypress', reset);
+        reset();
+        return () => { window.removeEventListener('mousemove', reset); window.removeEventListener('keypress', reset); clearTimeout(timer.current); };
+    }, [onIdle, timeout]);
+};
+
+// --- HELPER: Compress Image ---
+const compressImage = (file) => {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = (e) => {
+            const img = new Image();
+            img.src = e.target.result;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const scale = 800 / img.width;
+                canvas.width = 800; canvas.height = img.height * scale;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                resolve(canvas.toDataURL('image/jpeg', 0.7));
+            }
+        }
+    });
+};
+
 function App() {
+  // --- STATE ---
+  const [currentApp, setCurrentApp] = useState("chat"); // 'chat', 'media', 'settings'
+  const [isLocked, setIsLocked] = useState(false);
+  const [unlockPass, setUnlockPass] = useState("");
+
+  // Auth
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [authError, setAuthError] = useState("");
-  
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [myAvatar, setMyAvatar] = useState("");
-  
-  const [room, setRoom] = useState(""); 
-  const [currentMessage, setCurrentMessage] = useState("");
-  const [messageList, setMessageList] = useState([]);
-  const [typingUser, setTypingUser] = useState(""); 
-  
+  const [myBio, setMyBio] = useState("");
+  const [myStatus, setMyStatus] = useState("online");
+  const [themeColor, setThemeColor] = useState("#0055FF");
+
+  // Data
   const [friends, setFriends] = useState([]);
-  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [requests, setRequests] = useState([]);
+  const [onlineUsers, setOnlineUsers] = useState([]);
+
+  // Chat
+  const [room, setRoom] = useState("");
+  const [isGroupRoom, setIsGroupRoom] = useState(false);
+  const [messageList, setMessageList] = useState([]);
+  const [currentMessage, setCurrentMessage] = useState("");
+  const [mediaGallery, setMediaGallery] = useState([]);
+  const [typingUser, setTypingUser] = useState("");
+
+  // UI
+  const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, msg: null });
+  const [showEmoji, setShowEmoji] = useState(false);
   const [showAddFriend, setShowAddFriend] = useState(false);
-  const [friendInput, setFriendInput] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [groupNameInput, setGroupNameInput] = useState("");
+  const [selectedGroupMembers, setSelectedGroupMembers] = useState([]);
+  const [replyTo, setReplyTo] = useState(null);
 
-  // VOICE CHAT STATE
-  const [incomingCall, setIncomingCall] = useState(null);
+  // Voice
   const [isInCall, setIsInCall] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
+  const [incomingCall, setIncomingCall] = useState(null);
+  const [remoteStreamObj, setRemoteStreamObj] = useState(null);
 
-  // UPDATER STATE
-  const [updateStatus, setUpdateStatus] = useState("");
-  
-  // REFS
+  // Refs
   const bottomRef = useRef(null);
-  const typingTimeoutRef = useRef(null); 
+  const typingTimeoutRef = useRef(null);
   const peerInstance = useRef(null);
   const myStreamRef = useRef(null);
-  const remoteAudioRef = useRef(null);
+  const remoteVideoRef = useRef(null);
 
-  // --- AUTO LOGIN, UPDATER & CLEANUP ---
+  // --- IDLE CHECK ---
+  useIdleTimer(() => { if(isLoggedIn) setIsLocked(true); }, 600000);
+
+  // --- INIT ---
   useEffect(() => {
-    // 1. Check LocalStorage
-    const savedUser = localStorage.getItem("cranix_user");
-    if (savedUser) {
-      const userObj = JSON.parse(savedUser);
-      setUsername(userObj.username);
-      setMyAvatar(userObj.avatar || "");
-      connectSocket(userObj.username);
-      initializePeer(userObj.username);
-      fetchFriends(userObj.username);
-      fetchRequests(userObj.username);
+    const saved = localStorage.getItem("cranix_user");
+    if (saved) {
+      const u = JSON.parse(saved);
+      setUsername(u.username); setMyAvatar(u.avatar);
+      if(u.theme) { setThemeColor(u.theme); document.documentElement.style.setProperty('--cranix-blue', u.theme); }
+      connectSocket(u.username); initializePeer(u.username);
+      fetchFriends(u.username); fetchGroups(u.username); fetchRequests(u.username);
     }
-
-    // 2. Setup Auto Updater Listener
-    if (ipcRenderer) {
-      ipcRenderer.on('updater_message', (event, data) => {
-        console.log("Updater Event:", data);
-        switch (data.status) {
-          case 'checking':
-            setUpdateStatus("Checking for updates...");
-            break;
-          case 'available':
-            setUpdateStatus("Update found. Downloading...");
-            break;
-          case 'no_update':
-            // setUpdateStatus("You are up to date.");
-            setTimeout(() => setUpdateStatus(""), 3000);
-            break;
-          case 'downloading':
-            setUpdateStatus(`Downloading Update: ${Math.round(data.progress)}%`);
-            break;
-          case 'downloaded':
-            setUpdateStatus("Update downloaded. Restarting in 4 seconds...");
-            break;
-          case 'error':
-            setUpdateStatus(`Update Error: ${data.info}`);
-            break;
-          default:
-            break;
-        }
-      });
-    }
-
-    return () => {
-      if (peerInstance.current) peerInstance.current.destroy();
-      if (socket) socket.disconnect();
-      if (ipcRenderer) ipcRenderer.removeAllListeners('updater_message');
-    };
   }, []);
 
-  // --- AUTH ---
-  const handleLogin = async () => {
-    try {
-      const res = await fetch(`${SERVER_URL}/login`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        const avatar = data.avatar || "";
-        setMyAvatar(avatar);
-        localStorage.setItem("cranix_user", JSON.stringify({ username, avatar }));
-        
-        connectSocket(username);
-        initializePeer(username);
-        fetchFriends(username);
-        fetchRequests(username);
-      } else { setAuthError(data.error); }
-    } catch (err) { setAuthError("Server unavailable"); }
-  };
-
-  const handleRegister = async () => {
-    try {
-      const res = await fetch(`${SERVER_URL}/register`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (res.ok) { setAuthError(""); setIsRegistering(false); alert("Account created! Please log in."); } 
-      else { setAuthError(data.error); }
-    } catch (err) { setAuthError("Registration failed"); }
-  };
-
-  const handleLogout = () => {
-    if (peerInstance.current) peerInstance.current.destroy();
-    localStorage.removeItem("cranix_user");
-    window.location.reload();
-  };
-
-  const connectSocket = (user) => {
+  const connectSocket = (u) => {
     socket = io.connect(SERVER_URL);
     setIsLoggedIn(true);
-    socket.emit("user_login", user);
-    setupSocketListeners(user);
-  };
+    socket.emit("user_login", u);
 
-  // --- VOICE CHAT ---
-  const initializePeer = (myUsername) => {
-    if (peerInstance.current) peerInstance.current.destroy();
-
-    const peer = new Peer(myUsername, PEER_CONFIG);
-    
-    peer.on('open', (id) => { console.log("Phone line active: " + id); });
-    
-    peer.on('error', (err) => {
-      if (err.type === 'unavailable-id') {
-        setTimeout(() => initializePeer(myUsername), 1000);
-      } 
-      else if (err.type === 'peer-unavailable') {
-        sendSystemMessage("📞 Missed Call (User Offline)");
-        endCall(); 
-      }
-    });
-
-    peer.on('call', (call) => {
-      setIncomingCall({ caller: call.peer, callObj: call });
-    });
-
-    peerInstance.current = peer;
-  };
-
-  const startCall = async () => {
-    const friendName = room.replace(username, "").replace("_", "");
-    
-    if (!peerInstance.current || peerInstance.current.disconnected) {
-      alert("Phone line disconnected. Reconnecting...");
-      initializePeer(username);
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      myStreamRef.current = stream;
-      
-      const call = peerInstance.current.call(friendName, stream);
-      
-      if (!call) {
-        sendSystemMessage("📞 Missed Call (Connection Failed)");
-        endCall();
-        return;
-      }
-
-      setIsInCall(true);
-
-      call.on('stream', (remoteStream) => {
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.play();
-        }
-      });
-      call.on('close',endCall);
-      call.on('error', () => { sendSystemMessage("📞 Call Failed"); endCall(); });
-      
-    } catch (err) { alert("Microphone error: " + err.message); }
-  };
-
-  const answerCall = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      myStreamRef.current = stream;
-      incomingCall.callObj.answer(stream);
-      setIsInCall(true);
-      setIncomingCall(null);
-
-      incomingCall.callObj.on('stream', (remoteStream) => {
-        if (remoteAudioRef.current) {
-          remoteAudioRef.current.srcObject = remoteStream;
-          remoteAudioRef.current.play();
-        }
-      });
-      incomingCall.callObj.on('close', endCall);
-    } catch (err) { alert("Could not answer call."); }
-  };
-
-  const toggleMute = () => {
-    if (myStreamRef.current) {
-      const audioTrack = myStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
-      }
-    }
-  };
-
-  const endCall = () => {
-    if (myStreamRef.current) {
-      myStreamRef.current.getTracks().forEach(track => track.stop());
-      myStreamRef.current = null;
-    }
-    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
-    if (incomingCall && incomingCall.callObj) incomingCall.callObj.close();
-
-    setIsInCall(false);
-    setIncomingCall(null);
-    setIsMuted(false);
-  };
-
-  // --- SOCKET LISTENERS ---
-  const setupSocketListeners = (currentUser) => {
     socket.on("receive_message", (data) => {
-      setMessageList((list) => [...list, data]);
-      if (data.author !== currentUser && data.author !== "System") {
-        new Audio('/pop.mp3').play().catch(e => {});
+      setMessageList(prev => data.room === room ? [...prev, data] : prev);
+      if(data.room !== room && data.author !== u) {
+          const sound = data.message.includes(`@${u}`) ? '/mention.mp3' : '/pop.mp3';
+          new Audio(sound).play().catch(()=>{});
+          if(ipcRenderer && document.hidden) ipcRenderer.send('show-notification', { title: data.author, body: data.message });
       }
     });
-    socket.on("load_history", (history) => setMessageList(history));
-    socket.on("display_typing", (data) => setTypingUser(`${data.author} is typing...`));
+
+    socket.on("reaction_updated", ({ messageId, reactions }) => {
+        setMessageList(prev => prev.map(m => m._id === messageId ? { ...m, reactions } : m));
+    });
+    
+    socket.on("load_history", setMessageList);
+    socket.on("online_update", setOnlineUsers);
+    socket.on("friend_update", () => { fetchFriends(u); fetchRequests(u); });
+    socket.on("group_update", () => fetchGroups(u));
+    socket.on("display_typing", (d) => setTypingUser(`${d.author} is typing...`));
     socket.on("hide_typing", () => setTypingUser(""));
-    socket.on("friend_update", () => { 
-        fetchFriends(currentUser); 
-        fetchRequests(currentUser); 
-    });
-    socket.on("online_update", (users) => { setOnlineUsers(users); });
+    socket.on("message_deleted", ({id}) => setMessageList(prev => prev.filter(m => m._id !== id)));
   };
 
-  // --- APP LOGIC ---
+  // --- API ---
+  const handleLogin = async () => {
+      try {
+        const res = await fetch(`${SERVER_URL}/login`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({username,password})});
+        const data = await res.json();
+        if(res.ok) {
+            setIsLoggedIn(true); setMyAvatar(data.avatar);
+            if(data.theme) { setThemeColor(data.theme); document.documentElement.style.setProperty('--cranix-blue', data.theme); }
+            localStorage.setItem("cranix_user", JSON.stringify({username, avatar: data.avatar, theme: data.theme}));
+            connectSocket(username); initializePeer(username);
+            fetchFriends(username); fetchGroups(username); fetchRequests(username);
+        } else toast.error(data.error);
+      } catch(e) { toast.error("Server Down"); }
+  };
+
+  const updateProfile = async (newTheme) => {
+      const payload = { username, bio: myBio, status: myStatus };
+      if(newTheme) { payload.theme = newTheme; setThemeColor(newTheme); document.documentElement.style.setProperty('--cranix-blue', newTheme); }
+      await fetch(`${SERVER_URL}/update-profile`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+      toast.success("Saved");
+      let u = JSON.parse(localStorage.getItem("cranix_user"));
+      if(newTheme) u.theme = newTheme;
+      localStorage.setItem("cranix_user", JSON.stringify(u));
+  };
+
+  const fetchFriends = async(u) => { const res = await fetch(`${SERVER_URL}/friends/${u}`); setFriends(await res.json()); }
+  const fetchGroups = async(u) => { const res = await fetch(`${SERVER_URL}/groups/${u}`); setGroups(await res.json()); }
+  const fetchRequests = async(u) => { const res = await fetch(`${SERVER_URL}/requests/${u}`); setRequests(await res.json()); }
   
-  const fetchFriends = async (user) => {
-    try {
-      const res = await fetch(`${SERVER_URL}/friends/${user}`);
-      const data = await res.json();
-      setFriends(data);
-    } catch(e) { console.error("Error fetching friends"); }
+  const createGroup = async() => {
+      if(!groupNameInput) return;
+      const members = [...selectedGroupMembers, username];
+      await fetch(`${SERVER_URL}/create-group`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name:groupNameInput, members, admin:username})});
+      setShowCreateGroup(false); setGroupNameInput(""); setSelectedGroupMembers([]);
+      toast.success("Group Created");
   };
 
-  const fetchRequests = async (user) => {
-    try {
-      const res = await fetch(`${SERVER_URL}/requests/${user}`);
-      const data = await res.json();
-      setRequests(data);
-    } catch(e) {}
-  };
+  const fetchMedia = async() => { if(room) { const res = await fetch(`${SERVER_URL}/media/${room}`); setMediaGallery(await res.json()); }};
 
-  const sendFriendRequest = async () => {
-    if(!friendInput) return;
-    try {
-      const res = await fetch(`${SERVER_URL}/add-friend`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sender: username, receiver: friendInput }),
-      });
-      const data = await res.json();
-      
-      if(res.ok) { 
-        alert("Request Sent!"); 
-        setFriendInput(""); 
-        setShowAddFriend(false); 
-      } else { 
-        alert(data.error || "Failed to send request"); 
-      }
-    } catch(e) { alert("Network error"); }
-  };
-
-  const acceptRequest = async (requestId) => {
-    await fetch(`${SERVER_URL}/accept-friend`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId }),
-    });
-    fetchFriends(username);
-    fetchRequests(username);
-  };
-  
-  const handleProfileUpload = () => { document.getElementById("avatarInput").click(); };
-  const onAvatarFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result;
-        setMyAvatar(base64);
-        localStorage.setItem("cranix_user", JSON.stringify({ username, avatar: base64 }));
-        await fetch(`${SERVER_URL}/upload-avatar`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, image: base64 }),
-        });
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const startChat = (friendName) => {
-    const participants = [username, friendName].sort();
-    const newRoom = participants.join("_");
-    if (room === newRoom) return;
-    setRoom(newRoom);
-    setMessageList([]);
-    socket.emit("join_channel", newRoom);
-    setTypingUser("");
-  };
-
-  const sendSystemMessage = (text) => {
-    if (!room) return; 
-    const messageData = {
-      room: room, author: "System", message: text, image: "",
-      time: new Date().getHours() + ":" + String(new Date().getMinutes()).padStart(2, '0'),
-    };
-    socket.emit("send_message", messageData);
-    setMessageList((list) => [...list, messageData]);
+  // --- CHAT LOGIC ---
+  const startChat = (target, isGroup) => {
+      let newRoom = isGroup ? target._id : [username, target].sort().join("_");
+      setRoom(newRoom); setIsGroupRoom(isGroup); setMessageList([]);
+      socket.emit("join_channel", newRoom);
   };
 
   const sendMessage = async () => {
-    if (currentMessage !== "") {
-      const messageData = {
-        room: room, author: username, message: currentMessage, image: "",
-        time: new Date().getHours() + ":" + String(new Date().getMinutes()).padStart(2, '0'),
-      };
-      await socket.emit("send_message", messageData);
-      socket.emit("stop_typing", { room }); 
-      setMessageList((list) => [...list, messageData]);
-      setCurrentMessage("");
-    }
-  };
-  const getAvatarForUser = (user) => {
-    if (user === username) return myAvatar;
-    const friend = friends.find(f => f.username === user);
-    return friend ? friend.avatar : null;
-  };
-  const formatMessage = (text) => {
-    if(!text) return "";
-    const parts = text.split(/(`[^`]+`)/g);
-    return parts.map((part, i) => {
-      if(part.startsWith("`")) return <span key={i} className="code-block">{part.slice(1,-1)}</span>;
-      return part.split(/(\*\*[^*]+\*\*)/g).map((sub, j) => {
-        if(sub.startsWith("**")) return <strong key={j} className="chat-bold">{sub.slice(2,-2)}</strong>;
-        return sub.split(/(https?:\/\/[^\s]+)/g).map((lnk, k) => lnk.match(/http/) ? <a key={k} href={lnk} target="_blank" className="chat-link" rel="noreferrer">{lnk}</a> : lnk);
-      });
-    });
-  };
-  const handleTyping = (e) => {
-    setCurrentMessage(e.target.value);
-    socket.emit("typing", { room, author: username });
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => socket.emit("stop_typing", { room }), 2000);
-  };
-  const selectImage = () => document.getElementById("fileInput").click();
-  const handleFileChange = (e) => {
-    const f = e.target.files[0];
-    if(f) { const r = new FileReader(); r.onloadend = async () => {
-       const d = { room, author: username, message: "", image: r.result, time: new Date().getHours() + ":" + String(new Date().getMinutes()).padStart(2,'0') };
-       await socket.emit("send_message", d);
-       setMessageList((l) => [...l, d]);
-    }; r.readAsDataURL(f); }
-  };
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messageList, typingUser]); 
+      if(!currentMessage && !replyTo) return;
+      
+      // Slash Commands
+      if(currentMessage.startsWith("/clear")) { setMessageList([]); setCurrentMessage(""); return; }
+      if(currentMessage.startsWith("/shrug")) { socket.emit("send_message", { room, author: username, message: "¯\\_(ツ)_/¯", time: "Now" }); setCurrentMessage(""); return; }
 
-  // --- RENDER ---
+      const msg = { 
+          room, author: username, message: currentMessage, 
+          time: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),
+          replyTo: replyTo ? { author: replyTo.author, message: replyTo.message } : null 
+      };
+      await socket.emit("send_message", msg);
+      socket.emit("stop_typing", { room });
+      setCurrentMessage(""); setReplyTo(null); setShowEmoji(false);
+  };
+
+  const handleFileUpload = async (file) => {
+      if(file && file.type.startsWith("image/")) {
+          const compressed = await compressImage(file);
+          socket.emit("send_message", { room, author: username, message: "", image: compressed, time: "Now" });
+      }
+  };
+
+  const addReaction = (emoji) => {
+      socket.emit("add_reaction", { messageId: contextMenu.msg._id, emoji, username, room });
+      setContextMenu({ ...contextMenu, visible: false });
+  };
+
+  // --- VOICE LOGIC ---
+  const initializePeer = (u) => {
+      const peer = new Peer(u, PEER_CONFIG);
+      peer.on('call', (call) => setIncomingCall({ caller: call.peer, callObj: call }));
+      peerInstance.current = peer;
+  };
+  const startCall = async (video) => {
+      if(isGroupRoom) return toast.error("1-on-1 only");
+      const friend = room.replace(username, "").replace("_", "");
+      try {
+          const stream = video ? await navigator.mediaDevices.getDisplayMedia({video:true,audio:true}) : await navigator.mediaDevices.getUserMedia({audio:true});
+          myStreamRef.current = stream;
+          const call = peerInstance.current.call(friend, stream);
+          setIsInCall(true);
+          call.on('stream', (rs) => { setRemoteStreamObj(rs); if(remoteVideoRef.current) remoteVideoRef.current.srcObject = rs; });
+          call.on('close', endCall);
+      } catch(e) { toast.error("Call Failed"); }
+  };
+  const answerCall = async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      incomingCall.callObj.answer(stream);
+      setIsInCall(true); setIncomingCall(null);
+      incomingCall.callObj.on('stream', (rs) => { setRemoteStreamObj(rs); if(remoteVideoRef.current) remoteVideoRef.current.srcObject = rs; });
+  };
+  const endCall = () => { if(myStreamRef.current) myStreamRef.current.getTracks().forEach(t=>t.stop()); setIsInCall(false); setRemoteStreamObj(null); };
+
+  // --- RENDER HELPERS ---
+  const formatText = (text) => {
+      if(!text) return "";
+      const parts = text.split(/(\|\|.*?\|\||`[^`]+`|```[\s\S]*?```)/g);
+      return parts.map((part, i) => {
+          if(part.startsWith("||") && part.endsWith("||")) return <span key={i} className="spoiler" onClick={(e)=>e.target.classList.add('revealed')}>{part.slice(2,-2)}</span>;
+          if(part.startsWith("```")) return <SyntaxHighlighter key={i} language="javascript" style={vscDarkPlus}>{part.slice(3,-3)}</SyntaxHighlighter>;
+          if(part.startsWith("`")) return <span key={i} className="code-inline">{part.slice(1,-1)}</span>;
+          if(part.includes(`@${username}`)) return <span key={i} className="mention">{part}</span>;
+          return part;
+      });
+  };
+
+  // --- AUTO SCROLL ---
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messageList]);
+
+  // --- APP LOCK VIEW ---
+  if(isLocked) return (
+      <div className="app-lock">
+          <div className="lock-content">
+              <h1>TERMINAL LOCKED</h1>
+              <input type="password" placeholder="PASSWORD" value={unlockPass} onChange={e=>setUnlockPass(e.target.value)} />
+              <button onClick={()=>{ if(unlockPass===password) {setIsLocked(false); setUnlockPass("");} else toast.error("ACCESS DENIED"); }}>UNLOCK</button>
+          </div>
+      </div>
+  );
+
+  if(!isLoggedIn) return (
+      <div className="joinChatContainer">
+          <div className="ios-icon"><div className="inner-icon">C1</div></div>
+          <h3>CranixOne</h3>
+          <input onChange={e=>setUsername(e.target.value)} placeholder="Username"/>
+          <input type="password" onChange={e=>setPassword(e.target.value)} placeholder="Password"/>
+          <button onClick={handleLogin}>Log In</button>
+          <div className="switch-auth">Secure Terminal Access</div>
+      </div>
+  );
+
   return (
     <div className="App">
-      <audio ref={remoteAudioRef} />
+      <Toaster position="top-center" toastOptions={{style:{background:'#222', color:'#fff', border:'1px solid #444'}}} />
 
-      {/* --- UPDATE BANNER --- */}
-      {updateStatus && (
-        <div style={{
-          position: 'absolute', top: 0, left: 0, width: '100%', 
-          background: '#0055FF', color: 'white', padding: '8px', 
-          textAlign: 'center', zIndex: 9999, fontWeight: 'bold', fontSize: '14px',
-          boxShadow: '0 2px 10px rgba(0,0,0,0.3)'
-        }}>
-          {updateStatus}
-        </div>
+      {/* VIDEO OVERLAY */}
+      <div className={`video-container ${isInCall && remoteStreamObj?.getVideoTracks().length > 0 ? 'visible' : ''}`}>
+           <video ref={remoteVideoRef} autoPlay playsInline />
+           <button onClick={endCall} className="video-hangup">End Stream</button>
+      </div>
+      <audio ref={remoteVideoRef} autoPlay style={{display: remoteStreamObj?.getVideoTracks().length ? 'none' : 'block'}} />
+
+      {/* CALL MODAL */}
+      {incomingCall && !isInCall && (
+          <div className="modal-overlay">
+              <div className="modal-box center">
+                  <h3>Incoming Call: {incomingCall.caller}</h3>
+                  <button onClick={answerCall} className="btn-green">Answer</button>
+                  <button onClick={()=>{incomingCall.callObj.close(); setIncomingCall(null);}} className="btn-red">Decline</button>
+              </div>
+          </div>
       )}
 
-      {!isLoggedIn ? (
-        <div className="joinChatContainer">
-          <div className="ios-icon"><div className="inner-icon">C1</div></div>
-          <h3>{isRegistering ? "Create Account" : " CranixOne v0.0.4"}</h3>
-          <p className="subtitle">Secure Terminal Access</p>
-          <input type="text" placeholder="Username" onChange={(e) => setUsername(e.target.value)} />
-          <input type="password" placeholder="Password" onChange={(e) => setPassword(e.target.value)} />
-          {authError && <p style={{color: '#ff4444', fontSize: '12px', marginBottom:'10px'}}>{authError}</p>}
-          {isRegistering ? <button onClick={handleRegister}>Sign Up</button> : <button onClick={handleLogin}>Log In</button>}
-          <p className="switch-auth" onClick={() => { setIsRegistering(!isRegistering); setAuthError(""); }}>{isRegistering ? "Already have an account? Log In" : "Need an account? Register"}</p>
-        </div>
-      ) : (
-        <div className="chat-window">
-          {/* SIDEBAR */}
-          <div className="sidebar">
-            <input type="file" id="avatarInput" style={{display:'none'}} accept="image/*" onChange={onAvatarFileChange} />
-            <div className="sidebar-icon home-icon" onClick={() => setShowSettings(true)} title="Settings">
-               {myAvatar ? <img src={myAvatar} alt="me" className="sidebar-avatar-img"/> : username[0].toUpperCase()}
-            </div>
-            
-            <div className="separator"></div>
-            <div className="sidebar-icon" style={{background:'#333', color:'#fff', fontSize:'20px'}} onClick={() => setShowAddFriend(!showAddFriend)} title="Add Friend">+</div>
-            {requests.length > 0 && <div className="req-badge">{requests.length}</div>}
-            
-            <div className="friends-list">
-              {friends.map((friend) => (
-                <div 
-                  key={friend._id} 
-                  className={`sidebar-icon friend-icon ${room.includes(friend.username) ? "active" : ""}`} 
-                  onClick={() => startChat(friend.username)} 
-                  title={friend.username}
-                >
-                  {friend.avatar ? <img src={friend.avatar} alt={friend.username} className="sidebar-avatar-img"/> : friend.username.charAt(0).toUpperCase()}
-                  {onlineUsers.includes(friend.username) && <div className="online-dot-sidebar"></div>}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="chat-interface">
-            {/* SETTINGS MODAL */}
-            {showSettings && (
-              <div className="settings-overlay">
-                <div className="settings-card">
-                  <div className="settings-sidebar">
-                    <div className="settings-tab active">My Account</div>
-                  </div>
-                  <div className="settings-content">
-                    <button className="close-settings" onClick={() => setShowSettings(false)}>✕</button>
-                    <h2>My Account</h2>
-                    <div className="pfp-section">
-                      {myAvatar ? <img src={myAvatar} alt="me" className="large-pfp"/> : <div className="large-pfp" style={{background:'#0055ff', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'30px', fontWeight:'bold'}}>{username[0].toUpperCase()}</div>}
-                      <button className="pfp-btn" onClick={handleProfileUpload}>Change Avatar</button>
-                    </div>
-                    <div style={{marginBottom:'20px'}}>
-                      <label style={{color:'#888', fontSize:'12px', display:'block', marginBottom:'5px'}}>USERNAME</label>
-                      <input type="text" value={username} disabled style={{width:'100%', background:'#111', border:'1px solid #333', color:'#fff', padding:'10px', borderRadius:'5px'}} />
-                    </div>
-                    <button className="logout-btn" onClick={handleLogout}>Log Out</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {incomingCall && !isInCall && (
-              <div className="modal-overlay">
-                <div className="modal-box" style={{textAlign:'center'}}>
-                  <div className="avatar" style={{width:'80px', height:'80px', margin:'0 auto', fontSize:'30px'}}>
-                    {incomingCall.caller[0].toUpperCase()}
-                  </div>
-                  <h3>{incomingCall.caller} is calling...</h3>
-                  <div style={{display:'flex', gap:'10px', justifyContent:'center'}}>
-                    <button onClick={answerCall} style={{background:'#22c55e', width:'100px'}}>Answer</button>
-                    <button onClick={() => {incomingCall.callObj.close(); setIncomingCall(null);}} style={{background:'#ef4444', width:'100px'}}>Decline</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {showAddFriend && (
-               <div className="modal-overlay">
-                  <div className="modal-box">
-                     <h3>Add Friend</h3>
-                     <input placeholder="Username..." value={friendInput} onChange={(e) => setFriendInput(e.target.value)} />
-                     <button onClick={sendFriendRequest}>Send Request</button>
-                     {requests.length > 0 && (
-                        <div className="req-list">
-                          <p style={{color:'#888', fontSize:'12px', marginTop:'10px'}}>Incoming Requests:</p>
-                          {requests.map(req => (
-                             <div key={req._id} className="req-item"><span>{req.sender}</span><button style={{width:'30px', height:'30px', padding:0}} onClick={() => acceptRequest(req._id)}>✓</button></div>
-                          ))}
-                        </div>
-                     )}
-                     <button className="close-btn" style={{background:'transparent', border:'1px solid #333', color:'#888', marginTop:'10px'}} onClick={() => setShowAddFriend(false)}>Close</button>
-                  </div>
+      {/* ADD GROUP MODAL */}
+      {showCreateGroup && (
+           <div className="modal-overlay">
+               <div className="modal-box">
+                   <h3>New Channel</h3>
+                   <input placeholder="Name" value={groupNameInput} onChange={e=>setGroupNameInput(e.target.value)} />
+                   <div className="member-select-list">
+                       {friends.map(f => (
+                           <div key={f._id} className={`select-item ${selectedGroupMembers.includes(f.username)?'selected':''}`} 
+                                onClick={()=>{ if(selectedGroupMembers.includes(f.username)) setSelectedGroupMembers(p=>p.filter(x=>x!==f.username)); else setSelectedGroupMembers(p=>[...p,f.username]); }}>
+                               {f.username}
+                           </div>
+                       ))}
+                   </div>
+                   <button onClick={createGroup}>Create</button>
+                   <button className="close-btn" onClick={()=>setShowCreateGroup(false)}>Cancel</button>
                </div>
-            )}
-
-            {room ? (
-              <>
-                <div className="dynamic-island-container">
-                  <div className="dynamic-island">
-                    <div className={`live-dot ${onlineUsers.includes(room.replace(username, "").replace("_", "")) ? "online" : "offline"}`}></div>
-                    <p>@{room.replace(username, "").replace("_", "")}</p>
-                    <div className="call-controls" style={{marginLeft:'15px', display:'flex', gap:'10px'}}>
-                      {!isInCall ? (
-                        <button className="call-btn" onClick={startCall} title="Voice Call">
-                          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.43-5.15-3.75-6.58-6.59l1.97-1.57c.27-.27.35-.66.24-1.02-.36-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3.3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/></svg>
-                        </button>
-                      ) : (
-                        <>
-                          <button className={`call-btn ${isMuted ? "muted" : ""}`} onClick={toggleMute} title={isMuted ? "Unmute" : "Mute"}>
-                            {isMuted ? (
-                              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28v-3c0-3.31-2.69-6-6-6-.9 0-1.73.2-2.5.55l1.55 1.55c.3-.07.61-.1.95-.1 2.21 0 4 1.79 4 4v3zm-4 7c0 1.66-1.34 3-3 3s-3-1.34-3-3v-1H7v1c0 2.43 1.77 4.45 4.07 4.91v2.09h1.86v-2.09c2.3-.46 4.07-2.48 4.07-4.91v-1h-2v1zm-3.61-9.61l-7.9-7.9L2 1.98l18.51 18.52 1.41-1.41-3.69-3.69c-1.34 1.01-2.92 1.6-4.63 1.6v-2c1.21 0 2.34-.44 3.24-1.18l-3.32-3.32c-.11.01-.22.02-.33.02-2.21 0-4-1.79-4-4v-1.1L5.83 5.83l1.55 1.55c.01.21.01.42.01.62v3z"/></svg>
-                            ) : (
-                              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-                            )}
-                          </button>
-                          <button className="call-btn hangup" onClick={endCall} title="End Call">
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.73-1.68-1.36-2.66-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="chat-body">
-                  {messageList.map((msg, i) => {
-                    const userAvatar = getAvatarForUser(msg.author);
-                    if (msg.author === "System") {
-                      return <div key={i} className="system-message"><span className="system-pill">{msg.message}</span></div>
-                    }
-                    return (
-                      <div className="message-row" key={i}>
-                        <div className="avatar">
-                          {userAvatar ? <img src={userAvatar} alt="av" className="msg-avatar-img"/> : msg.author[0].toUpperCase()}
-                        </div>
-                        <div className="message-data">
-                          <div className="message-info"><span className="username">{msg.author}</span><span className="timestamp">{msg.time}</span></div>
-                          <div className="message-text">
-                             {msg.image ? <img src={msg.image} alt="uploaded" className="chat-image" /> : formatMessage(msg.message)}
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                  {typingUser && <div className="typing-indicator"><div className="typing-dots"><span></span><span></span><span></span></div><p>{typingUser}</p></div>}
-                  <div ref={bottomRef} />
-                </div>
-
-                <div className="chat-footer">
-                  <div className="input-capsule">
-                    <input type="file" id="fileInput" style={{display: "none"}} accept="image/*" onChange={handleFileChange} />
-                    <button onClick={selectImage}><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg></button>
-                    <input type="text" value={currentMessage} placeholder={`Message @${room.replace(username, "").replace("_", "")}`} onChange={handleTyping} onKeyPress={(e) => e.key === "Enter" && sendMessage()} />
-                    <button onClick={sendMessage}><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg></button>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="empty-state">
-                 <div className="ios-icon" style={{width:'60px', height:'60px', borderRadius:'18px', marginBottom:'20px'}}><div className="inner-icon" style={{fontSize:'20px'}}>C1</div></div>
-                 <h3>CranixOne</h3>
-                 <p>Select a friend to start chatting</p>
-              </div>
-            )}
-          </div>
-        </div>
+           </div>
       )}
+      {/* ADD FRIEND MODAL */}
+      {showAddFriend && (
+          <div className="modal-overlay">
+              <div className="modal-box">
+                  <h3>Add User</h3>
+                  <input id="friendIn" placeholder="Username" />
+                  <button onClick={async()=>{
+                      const v = document.getElementById("friendIn").value;
+                      const res = await fetch(`${SERVER_URL}/add-friend`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sender:username, receiver:v})});
+                      const d=await res.json(); res.ok?toast.success("Sent"):toast.error(d.error); setShowAddFriend(false);
+                  }}>Send Request</button>
+                  {requests.map(r=><div key={r._id} className="req-item">{r.sender} <button onClick={async()=>{await fetch(`${SERVER_URL}/accept-friend`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:r._id})}); fetchFriends(username); fetchRequests(username);}}>Accept</button></div>)}
+                  <button className="close-btn" onClick={()=>setShowAddFriend(false)}>Close</button>
+              </div>
+          </div>
+      )}
+
+      {/* CONTEXT MENU */}
+      {contextMenu.visible && (
+          <div className="context-menu" style={{top:contextMenu.y, left:contextMenu.x}}>
+              <div onClick={()=>addReaction('👍')}>👍 Like</div>
+              <div onClick={()=>addReaction('😂')}>😂 Laugh</div>
+              <div onClick={()=>addReaction('❤️')}>❤️ Love</div>
+              <div className="separator"></div>
+              <div onClick={()=>{setReplyTo(contextMenu.msg); setContextMenu({visible:false,x:0,y:0})}}>↩ Reply</div>
+              {contextMenu.msg.author === username && <div className="danger" onClick={()=>{socket.emit("delete_message",{id:contextMenu.msg._id, room}); setContextMenu({visible:false,x:0,y:0})}}>Delete</div>}
+          </div>
+      )}
+
+      {/* APP DOCK */}
+      <div className="app-dock">
+          <div className={`dock-item ${currentApp==='chat'?'active':''}`} onClick={()=>setCurrentApp('chat')}>💬</div>
+          <div className={`dock-item ${currentApp==='media'?'active':''}`} onClick={()=>{setCurrentApp('media'); fetchMedia();}}>🖼️</div>
+          <div className="dock-spacer"></div>
+          <div className={`dock-item ${currentApp==='settings'?'active':''}`} onClick={()=>setCurrentApp('settings')}>⚙️</div>
+      </div>
+
+      {/* MAIN STAGE */}
+      <div className="main-stage">
+          
+          {/* SETTINGS VIEW */}
+          {currentApp === 'settings' && (
+              <div className="settings-page">
+                  <h2>Configuration</h2>
+                  <div className="setting-block">
+                      <label>Theme Color</label>
+                      <div className="theme-grid">
+                          {['#0055FF', '#22c55e', '#ef4444', '#a855f7', '#f97316'].map(c => (
+                              <div key={c} className="theme-swatch" style={{background:c}} onClick={()=>updateProfile(c)}></div>
+                          ))}
+                      </div>
+                  </div>
+                  <div className="setting-block">
+                      <label>Status</label>
+                      <select value={myStatus} onChange={e=>{setMyStatus(e.target.value); updateProfile();}} className="settings-input">
+                          <option value="online">Online</option><option value="idle">Idle</option><option value="dnd">Do Not Disturb</option>
+                      </select>
+                  </div>
+                  <div className="setting-block">
+                      <label>Bio</label>
+                      <textarea className="settings-input" value={myBio} onChange={e=>setMyBio(e.target.value)} onBlur={()=>updateProfile()} />
+                  </div>
+                  <button className="logout-btn" onClick={()=>{localStorage.removeItem("cranix_user"); window.location.reload();}}>Log Out</button>
+              </div>
+          )}
+
+          {/* MEDIA GALLERY VIEW */}
+          {currentApp === 'media' && (
+              <div className="media-gallery-page">
+                  <h2>Gallery {room && ` - ${room}`}</h2>
+                  <div className="gallery-grid">
+                      {mediaGallery.map((m,i)=><div key={i} className="gallery-item"><img src={m.image} alt=""/></div>)}
+                  </div>
+              </div>
+          )}
+
+          {/* CHAT VIEW */}
+          {currentApp === 'chat' && (
+              <div className="chat-window-wrapper">
+                  <div className="sidebar">
+                       <div className="sidebar-icon home-icon">{myAvatar?<img src={myAvatar} className="sidebar-avatar-img" alt=""/>:username[0]}<div className={`status-dot ${myStatus}`}></div></div>
+                       <div className="separator"></div>
+                       <div className="sidebar-header">CHANNELS <button onClick={()=>setShowCreateGroup(true)}>+</button></div>
+                       {groups.map(g=><div key={g._id} className="sidebar-icon group-icon" onClick={()=>startChat(g,true)}>{g.name[0]}</div>)}
+                       <div className="sidebar-header">DIRECT</div>
+                       {friends.map(f=>{
+                           const onlineData = onlineUsers.find(u=>u[0]===f.username);
+                           const st = onlineData ? onlineData[1] : 'gray';
+                           return (
+                               <div key={f._id} className="sidebar-icon" onClick={()=>startChat(f.username,false)}>
+                                   {f.avatar?<img src={f.avatar} className="sidebar-avatar-img" alt=""/>:f.username[0]}
+                                   <div className="online-dot-sidebar" style={{background:st==='online'?'#22c55e':st==='dnd'?'#ef4444':st==='idle'?'#eab308':'#555'}}></div>
+                               </div>
+                           )
+                       })}
+                       <div className="sidebar-icon add-btn" onClick={()=>setShowAddFriend(true)}>+</div>
+                  </div>
+
+                  <div className="chat-interface">
+                      {room ? (
+                          <>
+                            <div className="dynamic-island-container">
+                                <div className="dynamic-island">
+                                    <p>@{isGroupRoom ? groups.find(g=>g._id===room)?.name : room.replace(username,"").replace("_","")}</p>
+                                    {!isGroupRoom && (
+                                        <div className="call-controls">
+                                            <button className="call-btn" onClick={()=>startCall(false)}>📞</button>
+                                            <button className="call-btn" onClick={()=>startCall(true)}>🖥️</button>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            <div className="chat-body">
+                                {messageList.map((msg, i) => (
+                                    <div key={i} className="message-row" onContextMenu={(e)=>{e.preventDefault(); setContextMenu({visible:true, x:e.pageX, y:e.pageY, msg})}}>
+                                        <div className="avatar">{msg.author[0]}</div>
+                                        <div className="message-data">
+                                            <div className="message-info"><span className="username">{msg.author}</span> <span className="timestamp">{msg.time}</span></div>
+                                            {msg.replyTo && <div className="reply-preview">Replying to {msg.replyTo.author}</div>}
+                                            <div className="message-text">
+                                                {msg.image ? <img src={msg.image} className="chat-image" alt=""/> : formatText(msg.message)}
+                                            </div>
+                                            {msg.reactions?.length > 0 && (
+                                                <div className="reactions-row">{msg.reactions.map(r=><span key={r.emoji} className="reaction-pill">{r.emoji} {r.count}</span>)}</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                                {typingUser && <div className="typing-indicator">{typingUser}</div>}
+                                <div ref={bottomRef} />
+                            </div>
+
+                            <div className="chat-footer">
+                                {replyTo && <div className="reply-bar">Replying to {replyTo.author} <button onClick={()=>setReplyTo(null)}>X</button></div>}
+                                <div className="input-capsule">
+                                    <button onClick={()=>setShowEmoji(!showEmoji)}>😊</button>
+                                    {showEmoji && <div className="emoji-popover"><EmojiPicker theme="dark" onEmojiClick={(e)=>{setCurrentMessage(p=>p+e.emoji); setShowEmoji(false);}}/></div>}
+                                    <input type="file" id="fi" hidden onChange={e=>handleFileUpload(e.target.files[0])} />
+                                    <button onClick={()=>document.getElementById("fi").click()}>📎</button>
+                                    <input value={currentMessage} onChange={e=>{setCurrentMessage(e.target.value); socket.emit("typing",{room,author:username}); clearTimeout(typingTimeoutRef.current); typingTimeoutRef.current=setTimeout(()=>socket.emit("stop_typing",{room}),2000);}} onKeyPress={e=>e.key==='Enter'&&sendMessage()} placeholder="Message..." />
+                                </div>
+                            </div>
+                          </>
+                      ) : <div className="empty-state"><h3>Select a Channel</h3></div>}
+                  </div>
+              </div>
+          )}
+      </div>
     </div>
   );
 }

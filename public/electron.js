@@ -1,27 +1,17 @@
-const { app, BrowserWindow, session, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Notification, Tray, Menu } = require('electron');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
-const log = require('electron-log');
 
-// --- CONFIGURE LOGGING ---
-autoUpdater.logger = log;
-autoUpdater.logger.transports.file.level = 'info';
-log.info('App starting...');
-
-// --- CONFIG UPDATER ---
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
-
-const isDev = !app.isPackaged;
-let win; // Keep reference globally
+let win;
+let tray;
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 1280,
+    height: 850,
     title: "CranixOne",
     icon: __dirname + '/favicon.ico',
-    show: false, // Don't show until ready
+    show: false,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -31,84 +21,51 @@ function createWindow() {
 
   win.setMenuBarVisibility(false);
 
-  // Permission Handlers (Mic/Camera)
-  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
-    return permission === 'media';
-  });
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(permission === 'media');
+  // Close to Tray behavior
+  win.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      win.hide();
+    }
+    return false;
   });
 
   // Load App
-  win.loadURL(
-    isDev
-      ? 'http://localhost:3000'
-      : `file://${path.join(__dirname, '../build/index.html')}`
-  );
+  const startUrl = process.env.ELECTRON_START_URL || `file://${path.join(__dirname, '../build/index.html')}`;
+  win.loadURL(startUrl);
 
-  // Show window when ready to prevent flickering
   win.once('ready-to-show', () => {
     win.show();
-    // TRIGGER UPDATE CHECK ON STARTUP
-    if (!isDev) {
-      log.info('Checking for updates...');
-      autoUpdater.checkForUpdatesAndNotify();
-    }
+    if (app.isPackaged) autoUpdater.checkForUpdatesAndNotify();
+
+    // Setup Tray
+    tray = new Tray(__dirname + '/favicon.ico');
+    const contextMenu = Menu.buildFromTemplate([
+      { label: 'Open CranixOne', click: () => win.show() },
+      { label: 'Quit', click: () => { app.isQuitting = true; app.quit(); } }
+    ]);
+    tray.setToolTip('CranixOne - Secure Terminal');
+    tray.setContextMenu(contextMenu);
+    tray.on('click', () => win.show());
   });
 }
 
 app.whenReady().then(createWindow);
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-// --- AUTO UPDATER EVENTS (Send to React) ---
-
-function sendStatusToWindow(text, info = null) {
-  log.info(text);
-  if (win) {
-    win.webContents.send('updater_message', { status: text, info: info });
-  }
-}
-
-autoUpdater.on('checking-for-update', () => {
-  sendStatusToWindow('checking');
+// Notifications
+ipcMain.on('show-notification', (event, { title, body }) => {
+  new Notification({ title, body, icon: __dirname + '/favicon.ico' }).show();
 });
 
-autoUpdater.on('update-available', (info) => {
-  sendStatusToWindow('available');
+// AutoUpdater events (Optional - keeping generic listeners)
+autoUpdater.on('update-available', () => {
+  if(win) win.webContents.send('updater_message', { status: 'available' });
 });
-
-autoUpdater.on('update-not-available', (info) => {
-  sendStatusToWindow('no_update');
-});
-
-autoUpdater.on('error', (err) => {
-  sendStatusToWindow('error', err.toString());
-});
-
-autoUpdater.on('download-progress', (progressObj) => {
-  if (win) {
-    win.webContents.send('updater_message', { 
-      status: 'downloading', 
-      progress: progressObj.percent 
-    });
-  }
-});
-
-autoUpdater.on('update-downloaded', (info) => {
-  sendStatusToWindow('downloaded');
-  // Quit and install after 4 seconds
-  setTimeout(() => {
-    autoUpdater.quitAndInstall();
-  }, 4000);
+autoUpdater.on('update-downloaded', () => {
+  if(win) win.webContents.send('updater_message', { status: 'downloaded' });
+  setTimeout(() => autoUpdater.quitAndInstall(), 5000);
 });
